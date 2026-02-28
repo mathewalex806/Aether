@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: journal-backend
+    environment:
+      - DOCKER_ENV=1
+    volumes:
+      # Bind mount: .gpg files live on your host machine, never in a named Docker volume
+      - ./data:/data
+    restart: unless-stopped
+    networks:
+      - journal-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: journal-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - journal-net
+    restart: unless-stopped
+
+networks:
+  journal-net:
+    driver: bridge

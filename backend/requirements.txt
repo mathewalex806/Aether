@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+python-gnupg
+pydantic
+python-multipart
