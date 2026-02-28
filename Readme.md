@@ -1,6 +1,5 @@
-# AetherJournal — Walkthrough
+# Aether
 
-## What Was Built
 
 A fully encrypted, private journaling application with:
 - **Python/FastAPI backend** using `python-gnupg` (AES-256 symmetric encryption)
@@ -46,7 +45,7 @@ secure-journal/
 ## How to Start
 
 ```bash
-cd /home/alex/Desktop/Aether/secure-journal
+cd Aether/
 docker compose up --build
 ```
 
