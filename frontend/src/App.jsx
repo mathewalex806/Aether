@@ -1,17 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen } from 'lucide-react';
+import { BookOpen, MessageSquare, Brain } from 'lucide-react';
 import AuthScreen from './AuthScreen';
 import Sidebar from './Sidebar';
 import Editor from './Editor';
+import Chat from './Chat';
+import MemoryViewer from './MemoryViewer';
 import { api } from './api';
 
 function WelcomeState() {
   return (
     <div className="welcome-state">
       <div className="welcome-inner">
-        <div className="welcome-graphic">
-          <BookOpen size={36} />
-        </div>
+        <div className="welcome-graphic"><BookOpen size={36} /></div>
         <h2>Select an entry</h2>
         <p>Choose a journal entry from the sidebar, or create a new one with the <strong>+</strong> button.</p>
       </div>
@@ -19,13 +19,18 @@ function WelcomeState() {
   );
 }
 
+const NAV_TABS = [
+  { id: 'journal', label: 'Journal', icon: BookOpen },
+  { id: 'chat', label: 'Chat', icon: MessageSquare },
+  { id: 'memories', label: 'Memories', icon: Brain },
+];
+
 export default function App() {
   const [password, setPassword] = useState(null);
   const [files, setFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
   const [loadingFiles, setLoadingFiles] = useState(false);
-
-  const authenticated = !!password;
+  const [activeTab, setActiveTab] = useState('journal');
 
   const loadFiles = useCallback(async (pw) => {
     setLoadingFiles(true);
@@ -43,61 +48,75 @@ export default function App() {
     if (password) loadFiles(password);
   }, [password]);
 
-  function handleAuthenticated(pw) {
-    setPassword(pw);
-  }
+  function handleAuthenticated(pw) { setPassword(pw); }
 
   function handleLock() {
     setPassword(null);
     setFiles([]);
     setSelectedFile(null);
+    setActiveTab('journal');
   }
 
   function handleNewFile(name) {
-    // Pre-create entry in list, open it for editing; 
-    // it'll be saved upon first save action
-    if (!files.includes(name)) {
-      setFiles((prev) => [name, ...prev]);
-    }
+    if (!files.includes(name)) setFiles(prev => [name, ...prev]);
     setSelectedFile(name);
   }
 
   function handleDeleteFile(name) {
-    setFiles((prev) => prev.filter((f) => f !== name));
+    setFiles(prev => prev.filter(f => f !== name));
     setSelectedFile(null);
-    // Reload to stay in sync
     loadFiles(password);
   }
 
-  function handleSaved() {
-    loadFiles(password);
-  }
-
-  if (!authenticated) {
-    return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  }
+  if (!password) return <AuthScreen onAuthenticated={handleAuthenticated} />;
 
   return (
     <div className="app-layout">
-      <Sidebar
-        files={files}
-        selected={selectedFile}
-        onSelect={setSelectedFile}
-        onNew={handleNewFile}
-        onLock={handleLock}
-        loading={loadingFiles}
-      />
+      {/* Sidebar only shown in journal view */}
+      {activeTab === 'journal' && (
+        <Sidebar
+          files={files}
+          selected={selectedFile}
+          onSelect={setSelectedFile}
+          onNew={handleNewFile}
+          onLock={handleLock}
+          loading={loadingFiles}
+        />
+      )}
+
       <main className="main-content">
-        {selectedFile ? (
-          <Editor
-            key={selectedFile}
-            name={selectedFile}
-            password={password}
-            onSaved={handleSaved}
-            onDeleted={handleDeleteFile}
-          />
-        ) : (
-          <WelcomeState />
+        {/* Top navigation tabs */}
+        <nav className="app-nav">
+          <div className="app-nav-left">
+            {NAV_TABS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                className={`nav-tab ${activeTab === id ? 'active' : ''}`}
+                onClick={() => setActiveTab(id)}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </div>
+          {activeTab !== 'journal' && (
+            <button className="nav-lock-btn" onClick={handleLock} title="Lock vault">
+              🔒 Lock
+            </button>
+          )}
+        </nav>
+
+        {/* Views */}
+        {activeTab === 'journal' && (
+          selectedFile
+            ? <Editor key={selectedFile} name={selectedFile} password={password} onSaved={() => loadFiles(password)} onDeleted={handleDeleteFile} />
+            : <WelcomeState />
+        )}
+        {activeTab === 'chat' && (
+          <Chat password={password} journalFiles={files} />
+        )}
+        {activeTab === 'memories' && (
+          <MemoryViewer password={password} />
         )}
       </main>
     </div>

@@ -3,3 +3,6 @@ uvicorn
 python-gnupg
 pydantic
 python-multipart
+httpx
+chromadb
+sse-starlette
