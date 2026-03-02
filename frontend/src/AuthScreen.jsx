@@ -34,7 +34,7 @@ export default function AuthScreen({ onAuthenticated }) {
                         <ShieldCheck size={22} color="white" />
                     </div>
                     <div className="auth-logo-text">
-                        <h1>AetherJournal</h1>
+                        <h1>Aether</h1>
                         <p>End-to-end encrypted</p>
                     </div>
                 </div>

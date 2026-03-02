@@ -6,7 +6,7 @@ import httpx
 import chromadb
 from pathlib import Path
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -35,15 +35,17 @@ gpg = gnupg.GPG(gnupghome=gpg_home)
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
-# ─── SQLite — primary memory store ───────────────────────────────────────────
+# ─── SQLite ───────────────────────────────────────────────────────────────────
 def _init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS memories (
-                title      TEXT PRIMARY KEY,
-                content    TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                title        TEXT    NOT NULL,
+                journal_name TEXT,               -- NULL = global
+                content      TEXT    NOT NULL,
+                created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (title, journal_name)
             )
         """)
         con.commit()
@@ -62,36 +64,54 @@ def _db():
         con.close()
 
 
-def db_upsert(title: str, content: str):
+# ─── SQLite CRUD (all scoped) ─────────────────────────────────────────────────
+
+def db_upsert(title: str, content: str, journal_name: str | None):
+    """Insert or update a memory. journal_name=None means global."""
     with _db() as con:
         con.execute("""
-            INSERT INTO memories (title, content, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(title) DO UPDATE SET
+            INSERT INTO memories (title, journal_name, content, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(title, journal_name) DO UPDATE SET
                 content    = excluded.content,
                 updated_at = CURRENT_TIMESTAMP
-        """, (title, content))
+        """, (title, journal_name, content))
 
 
-def db_delete(title: str):
+def db_delete(title: str, journal_name: str | None):
     with _db() as con:
-        con.execute("DELETE FROM memories WHERE title = ?", (title,))
+        con.execute(
+            "DELETE FROM memories WHERE title = ? AND journal_name IS ?",
+            (title, journal_name)
+        )
 
 
-def db_all() -> list[dict]:
+def db_all(journal_name: str | None = None, include_global: bool = False) -> list[dict]:
     with _db() as con:
-        rows = con.execute(
-            "SELECT title, content FROM memories ORDER BY updated_at DESC"
-        ).fetchall()
-    return [{"title": r["title"], "content": r["content"]} for r in rows]
+        if journal_name is None and not include_global:
+            rows = con.execute(
+                "SELECT title, journal_name, content FROM memories ORDER BY journal_name, updated_at DESC"
+            ).fetchall()
+        elif journal_name is not None and not include_global:
+            rows = con.execute(
+                "SELECT title, journal_name, content FROM memories WHERE journal_name = ? ORDER BY updated_at DESC",
+                (journal_name,)
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """SELECT title, journal_name, content FROM memories
+                   WHERE journal_name = ? OR journal_name IS NULL
+                   ORDER BY updated_at DESC""",
+                (journal_name,)
+            ).fetchall()
+    return [{"title": r["title"], "journal_name": r["journal_name"], "content": r["content"]} for r in rows]
 
 
-def db_keyword_search(query: str, n: int = 6) -> list[dict]:
-    """Score every memory by how many query terms appear in title+content."""
+def db_keyword_search(query: str, journal_name: str | None, include_global: bool, n: int = 6) -> list[dict]:
     terms = [t for t in query.lower().split() if len(t) > 2]
+    rows  = db_all(journal_name, include_global)
     if not terms:
-        return db_all()[:n]
-    rows = db_all()
+        return rows[:n]
     scored = []
     for row in rows:
         haystack = (row["title"] + " " + row["content"]).lower()
@@ -102,7 +122,7 @@ def db_keyword_search(query: str, n: int = 6) -> list[dict]:
     return [r for _, r in scored[:n]]
 
 
-# ─── ChromaDB — vector store (best-effort) ───────────────────────────────────
+# ─── ChromaDB ─────────────────────────────────────────────────────────────────
 chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
 memory_collection = chroma_client.get_or_create_collection(
     name="memories",
@@ -110,20 +130,17 @@ memory_collection = chroma_client.get_or_create_collection(
 )
 
 
-def _get_embedding(text: str) -> list[float] | None:
-    """
-    Try embedding models in order of preference.
-    Falls back to the first available chat model (all Ollama models support /api/embeddings).
-    Returns None only if Ollama is completely unreachable.
-    """
-    candidates = ["nomic-embed-text", "all-minilm"]
+def _chroma_id(title: str, journal_name: str | None) -> str:
+    scope = journal_name or "__global__"
+    return f"{scope}::{title}"
 
-    # Add whatever chat models are loaded
+
+def _get_embedding(text: str) -> list[float] | None:
+    candidates = ["nomic-embed-text", "all-minilm"]
     try:
         resp = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         if resp.status_code == 200:
-            chat_models = [m["name"] for m in resp.json().get("models", [])]
-            candidates += chat_models
+            candidates += [m["name"] for m in resp.json().get("models", [])]
     except Exception:
         pass
 
@@ -140,74 +157,97 @@ def _get_embedding(text: str) -> list[float] | None:
                     return emb
         except Exception:
             continue
-
     return None
 
 
-def _chroma_upsert(title: str, content: str):
+def _chroma_upsert(title: str, content: str, journal_name: str | None):
     emb = _get_embedding(f"{title}: {content}")
     if emb:
+        doc_id = _chroma_id(title, journal_name)
         memory_collection.upsert(
-            ids=[title],
+            ids=[doc_id],
             embeddings=[emb],
             documents=[content],
-            metadatas=[{"title": title}],
+            metadatas=[{
+                "title":        title,
+                "journal_name": journal_name or "__global__",
+            }],
         )
 
 
-def _chroma_delete(title: str):
+def _chroma_delete(title: str, journal_name: str | None):
     try:
-        memory_collection.delete(ids=[title])
+        memory_collection.delete(ids=[_chroma_id(title, journal_name)])
     except Exception:
         pass
+
+
+def _chroma_search(query: str, journal_name: str | None, include_global: bool, n: int) -> list[dict]:
+    emb = _get_embedding(query)
+    if not emb or memory_collection.count() == 0:
+        return []
+
+    if journal_name is None:
+        where = None
+    elif include_global:
+        where = {"$or": [
+            {"journal_name": {"$eq": journal_name}},
+            {"journal_name": {"$eq": "__global__"}},
+        ]}
+    else:
+        where = {"journal_name": {"$eq": journal_name}}
+
+    try:
+        kwargs = dict(query_embeddings=[emb], n_results=min(n, memory_collection.count()))
+        if where:
+            kwargs["where"] = where
+        res = memory_collection.query(**kwargs)
+        return [
+            {
+                "title":        m["title"],
+                "journal_name": None if m["journal_name"] == "__global__" else m["journal_name"],
+                "content":      doc,
+            }
+            for m, doc in zip(res["metadatas"][0], res["documents"][0])
+        ]
+    except Exception:
+        return []
 
 
 # ─── Unified memory API ───────────────────────────────────────────────────────
-def persist_memory(title: str, content: str):
-    """Save to SQLite (always) and ChromaDB (best-effort)."""
-    db_upsert(title, content)
+
+def persist_memory(title: str, content: str, journal_name: str | None):
+    """Write to SQLite + ChromaDB, both scoped to journal_name (None = global)."""
+    db_upsert(title, content, journal_name)
     try:
-        _chroma_upsert(title, content)
+        _chroma_upsert(title, content, journal_name)
     except Exception:
         pass
 
 
-def remove_memory(title: str):
-    db_delete(title)
-    _chroma_delete(title)
+def remove_memory(title: str, journal_name: str | None):
+    db_delete(title, journal_name)
+    _chroma_delete(title, journal_name)
 
 
-def search_memories(query: str, n: int = 6) -> list[dict]:
+def search_memories(query: str, journal_name: str | None, n: int = 6) -> list[dict]:
     """
-    3-tier RAG retrieval so the agent is NEVER memory-blind:
-      1. ChromaDB vector search (semantic)
-      2. SQLite keyword search (lexical)
-      3. All memories (brute-force last resort)
+    3-tier RAG, scoped to journal first, then falling back to global memories.
+    Tier 1 → ChromaDB vector search (journal + global)
+    Tier 2 → SQLite keyword search (journal + global)
+    Tier 3 → All memories for this journal + all globals (last resort)
     """
-    # Tier 1 — vector
-    try:
-        emb = _get_embedding(query)
-        if emb and memory_collection.count() > 0:
-            res = memory_collection.query(
-                query_embeddings=[emb],
-                n_results=min(n, memory_collection.count()),
-            )
-            hits = [
-                {"title": m["title"], "content": doc}
-                for m, doc in zip(res["metadatas"][0], res["documents"][0])
-            ]
-            if hits:
-                return hits
-    except Exception:
-        pass
+    include_global = journal_name is not None
 
-    # Tier 2 — keyword
-    hits = db_keyword_search(query, n)
+    hits = _chroma_search(query, journal_name, include_global, n)
     if hits:
         return hits
 
-    # Tier 3 — all (agent should see everything rather than nothing)
-    return db_all()[:n]
+    hits = db_keyword_search(query, journal_name, include_global, n)
+    if hits:
+        return hits
+
+    return db_all(journal_name, include_global)[:n]
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -226,13 +266,21 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    model: str
-    messages: List[ChatMessage]
-    journal_context: Optional[str] = None
+    model:           str
+    messages:        List[ChatMessage]
+    journal_context: Optional[str]  = None   # decrypted journal text
+    journal_name:    Optional[str]  = None   # journal filename (e.g. "2024-01-15")
 
 class MemoryItem(BaseModel):
-    title: str
-    content: str
+    title:        str
+    content:      str
+    journal_name: Optional[str] = None
+
+class SaveMessageAsMemoryRequest(BaseModel):
+    """Explicit user-triggered save of a specific chat message to memory."""
+    content:      str                  # the message text to save
+    title:        Optional[str] = None # optional custom title; auto-generated if omitted
+    journal_name: Optional[str] = None # scope (None = global)
 
 
 # ─── Journal endpoints ────────────────────────────────────────────────────────
@@ -298,81 +346,107 @@ def list_models():
         return {"models": [], "error": str(e)}
 
 
-# ─── Memory CRUD REST (used by MemoryViewer UI) ───────────────────────────────
+# ─── Memory CRUD REST ─────────────────────────────────────────────────────────
+
 @app.get("/api/memories")
-def list_memories():
-    return {"memories": db_all()}
+def list_memories(journal: Optional[str] = Query(None)):
+    return {"memories": db_all(journal_name=journal)}
 
 
 @app.get("/api/memories/{title}")
-def get_memory(title: str):
+def get_memory(title: str, journal: Optional[str] = Query(None)):
     with _db() as con:
         row = con.execute(
-            "SELECT title, content FROM memories WHERE title = ?", (title,)
+            "SELECT title, journal_name, content FROM memories WHERE title = ? AND journal_name IS ?",
+            (title, journal)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return {"title": row["title"], "content": row["content"]}
+    return {"title": row["title"], "journal_name": row["journal_name"], "content": row["content"]}
 
 
 @app.post("/api/memories")
 def save_memory_endpoint(item: MemoryItem):
-    """Called when user confirms a suggested memory from the UI."""
-    persist_memory(item.title, item.content)
-    return {"status": "saved", "title": item.title}
+    """Save a memory directly (e.g. from the memory manager UI)."""
+    persist_memory(item.title, item.content, item.journal_name)
+    return {"status": "saved", "title": item.title, "journal_name": item.journal_name}
+
+
+@app.post("/api/memories/save-message")
+def save_message_as_memory(req: SaveMessageAsMemoryRequest):
+    """
+    Explicit user-triggered endpoint: save a specific chat message as a memory.
+    If no title is provided, one is auto-generated from the first few words.
+    """
+    title = req.title
+    if not title:
+        # Auto-generate a snake_case title from the first ~5 words
+        words = req.content.strip().split()[:5]
+        title = "_".join(w.lower().strip(".,!?;:'\"") for w in words if w)
+        title = title[:60]  # cap length
+
+    persist_memory(title, req.content, req.journal_name)
+    return {"status": "saved", "title": title, "journal_name": req.journal_name}
 
 
 @app.delete("/api/memories/{title}")
-def delete_memory_endpoint(title: str):
-    remove_memory(title)
+def delete_memory_endpoint(title: str, journal: Optional[str] = Query(None)):
+    remove_memory(title, journal)
     return {"status": "deleted"}
 
 
 # ─── Chat streaming ───────────────────────────────────────────────────────────
+
+# The system prompt no longer instructs the model to auto-suggest or auto-save
+# memories. Memory saving is now 100% user-driven via the UI dropdown.
 SYSTEM_PROMPT = """You are Aether, a private and thoughtful AI journal companion.
 Everything you process stays 100% local — nothing leaves this machine.
 
 ━━━ MEMORY INSTRUCTIONS ━━━
-When you see a "What I remember about you:" section below, those facts come from your
-long-term memory database. They are ground truth. Answer questions from them directly
-and confidently — never say you don't know something that a memory covers.
+When you see a "What I remember" section below, those facts come from your long-term memory
+database. They are ground truth. Answer questions from them directly and confidently.
+Never say you don't know something that a memory already covers.
 
-You have two tools to record NEW information:
+Do NOT emit any <<<...>>> tool blocks. Memory saving is handled entirely by the user
+through the interface — you never save or suggest saving memories on your own.
 
-1. SAVE_MEMORY — only when the user EXPLICITLY says "remember", "save", or "store":
-   <<<SAVE_MEMORY:snake_case_title|Full sentence describing the fact.>>>
-
-2. SUGGEST_MEMORY — when you notice a significant lasting fact the user did NOT ask to save
-   (preference, goal, relationship, health detail, recurring feeling).
-   The user will be asked to confirm before it is stored:
-   <<<SUGGEST_MEMORY:snake_case_title|Full sentence describing the fact.>>>
-
-Rules:
-- Answer from memory first. Be direct and confident when a memory is relevant.
-- Never use SAVE_MEMORY unless the user explicitly asked.
-- Titles: snake_case, max 3 words.
-- After saving/suggesting, just acknowledge naturally — don't repeat the content.
+Guidelines:
+- Answer from memory first when relevant. Be direct and confident.
 - Be warm, concise, and empathetic.
+- When referring to past context from memories, acknowledge it naturally.
 """
 
-TOOL_MARKERS = ["<<<SAVE_MEMORY:", "<<<SUGGEST_MEMORY:"]
-TOOL_END = ">>>"
+# Journal-pane agent uses the same system prompt but receives the full journal
+# text as additional context. A separate endpoint lets the frontend distinguish
+# "journal agent" from "standalone agent" without any backend logic change —
+# both go through /api/chat; the journal_context and journal_name fields carry
+# the distinction.
 
 
-async def _stream_chat(model: str, messages: list, journal_context: str | None):
-
-    # ── RAG: inject relevant memories into the system prompt ─────────────────
+async def _stream_chat(
+    model:           str,
+    messages:        list,
+    journal_context: str | None,
+    journal_name:    str | None,
+):
+    # ── RAG: retrieve memories scoped to this journal (+ globals) ────────────
     last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-    relevant = search_memories(last_user)
+    relevant  = search_memories(last_user, journal_name)
 
     memory_section = ""
     if relevant:
-        lines = [f"  • [{r['title'].replace('_', ' ')}]: {r['content']}" for r in relevant]
-        memory_section = "What I remember about you:\n" + "\n".join(lines) + "\n\n"
+        scope_label = f'from journal "{journal_name}"' if journal_name else "global"
+        lines = []
+        for r in relevant:
+            jname = r.get("journal_name")
+            badge = f'[{jname}]' if jname else '[global]'
+            lines.append(f"  • {badge} {r['title'].replace('_', ' ')}: {r['content']}")
+        memory_section = f"What I remember ({scope_label} + global):\n" + "\n".join(lines) + "\n\n"
 
     journal_section = ""
     if journal_context:
-        journal_section = f"Journal context:\n---\n{journal_context}\n---\n\n"
+        label = f'Journal entry "{journal_name}"' if journal_name else "Journal context"
+        journal_section = f"{label}:\n---\n{journal_context}\n---\n\n"
 
     system_content = SYSTEM_PROMPT
     if memory_section or journal_section:
@@ -382,10 +456,7 @@ async def _stream_chat(model: str, messages: list, journal_context: str | None):
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
 
-    # ── Stream + intercept tool markers ──────────────────────────────────────
-    tool_buffer = ""
-    collecting_tool: str | bool = False
-
+    # ── Stream tokens straight to the client (no tool interception needed) ───
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream(
             "POST",
@@ -407,52 +478,9 @@ async def _stream_chat(model: str, messages: list, journal_context: str | None):
 
                 token = chunk.get("message", {}).get("content", "")
                 if token:
-                    tool_buffer += token
-
-                while True:
-                    if not collecting_tool:
-                        found_marker, found_idx = None, len(tool_buffer)
-                        for marker in TOOL_MARKERS:
-                            idx = tool_buffer.find(marker)
-                            if idx != -1 and idx < found_idx:
-                                found_marker, found_idx = marker, idx
-
-                        if found_marker is not None:
-                            if found_idx > 0:
-                                yield f"data: {json.dumps({'token': tool_buffer[:found_idx]})}\n\n"
-                            tool_buffer = tool_buffer[found_idx:]
-                            collecting_tool = found_marker
-                        else:
-                            safe = tool_buffer[:-20] if len(tool_buffer) > 20 else ""
-                            if safe:
-                                yield f"data: {json.dumps({'token': safe})}\n\n"
-                                tool_buffer = tool_buffer[-20:]
-                            break
-                    else:
-                        end_idx = tool_buffer.find(TOOL_END, len(collecting_tool))
-                        if end_idx == -1:
-                            break
-
-                        call_body = tool_buffer[len(collecting_tool):end_idx]
-                        after     = tool_buffer[end_idx + len(TOOL_END):]
-                        is_save   = collecting_tool == "<<<SAVE_MEMORY:"
-                        collecting_tool = False
-                        tool_buffer = after
-
-                        if "|" in call_body:
-                            title, content = call_body.split("|", 1)
-                            title   = title.strip().replace(" ", "_").lower()
-                            content = content.strip()
-
-                            if is_save:
-                                persist_memory(title, content)
-                                yield f"data: {json.dumps({'tool': 'save_memory', 'title': title, 'content': content})}\n\n"
-                            else:
-                                yield f"data: {json.dumps({'tool': 'suggest_memory', 'title': title, 'content': content})}\n\n"
+                    yield f"data: {json.dumps({'token': token})}\n\n"
 
                 if chunk.get("done"):
-                    if tool_buffer and not collecting_tool:
-                        yield f"data: {json.dumps({'token': tool_buffer})}\n\n"
                     break
 
     yield f"data: {json.dumps({'done': True})}\n\n"
@@ -462,7 +490,12 @@ async def _stream_chat(model: str, messages: list, journal_context: str | None):
 async def chat(req: ChatRequest, password: str = Depends(get_password)):
     verify_password(password)
     return StreamingResponse(
-        _stream_chat(req.model, [m.dict() for m in req.messages], req.journal_context),
+        _stream_chat(
+            model=req.model,
+            messages=[m.dict() for m in req.messages],
+            journal_context=req.journal_context,
+            journal_name=req.journal_name,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
