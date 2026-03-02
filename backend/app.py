@@ -32,6 +32,7 @@ CHROMA_DIR = str(DATA_DIR / ".chromadb")
 gpg_home = str(DATA_DIR / ".gnupg")
 os.makedirs(gpg_home, exist_ok=True)
 gpg = gnupg.GPG(gnupghome=gpg_home)
+gpg.encoding = "utf-8"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
