@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
-
+import dotenv
+dotenv.load_dotenv()
 app = FastAPI()
 
 app.add_middleware(
@@ -35,6 +36,13 @@ gpg = gnupg.GPG(gnupghome=gpg_home)
 gpg.encoding = "utf-8"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+# ─── Context window limits ────────────────────────────────────────────────────
+MAX_HISTORY_TURNS   = 4     # keep last N user/assistant message pairs
+MAX_JOURNAL_CHARS   = 2000   # truncate injected journal text
+MAX_MEMORY_CHARS    = 300    # truncate each individual memory's content
+MAX_MEMORY_RESULTS  = 4      # fewer RAG hits → smaller prompt
+MAX_PREDICT_TOKENS  = 512    # cap Ollama response length
 
 # ─── SQLite ───────────────────────────────────────────────────────────────────
 def _init_db():
@@ -108,7 +116,7 @@ def db_all(journal_name: str | None = None, include_global: bool = False) -> lis
     return [{"title": r["title"], "journal_name": r["journal_name"], "content": r["content"]} for r in rows]
 
 
-def db_keyword_search(query: str, journal_name: str | None, include_global: bool, n: int = 6) -> list[dict]:
+def db_keyword_search(query: str, journal_name: str | None, include_global: bool, n: int = MAX_MEMORY_RESULTS) -> list[dict]:
     terms = [t for t in query.lower().split() if len(t) > 2]
     rows  = db_all(journal_name, include_global)
     if not terms:
@@ -231,7 +239,7 @@ def remove_memory(title: str, journal_name: str | None):
     _chroma_delete(title, journal_name)
 
 
-def search_memories(query: str, journal_name: str | None, n: int = 6) -> list[dict]:
+def search_memories(query: str, journal_name: str | None, n: int = MAX_MEMORY_RESULTS) -> list[dict]:
     """
     3-tier RAG, scoped to journal first, then falling back to global memories.
     Tier 1 → ChromaDB vector search (journal + global)
@@ -381,10 +389,9 @@ def save_message_as_memory(req: SaveMessageAsMemoryRequest):
     """
     title = req.title
     if not title:
-        # Auto-generate a snake_case title from the first ~5 words
         words = req.content.strip().split()[:5]
         title = "_".join(w.lower().strip(".,!?;:'\"") for w in words if w)
-        title = title[:60]  # cap length
+        title = title[:60]
 
     persist_memory(title, req.content, req.journal_name)
     return {"status": "saved", "title": title, "journal_name": req.journal_name}
@@ -396,10 +403,38 @@ def delete_memory_endpoint(title: str, journal: Optional[str] = Query(None)):
     return {"status": "deleted"}
 
 
+# ─── Context window helpers ───────────────────────────────────────────────────
+
+def _trim_history(messages: list[dict]) -> list[dict]:
+    """
+    Keep only the last MAX_HISTORY_TURNS pairs (user + assistant).
+    Always preserves an even number of messages so the conversation
+    stays well-formed (user → assistant → user …).
+    """
+    # MAX_HISTORY_TURNS pairs = MAX_HISTORY_TURNS * 2 messages
+    limit = MAX_HISTORY_TURNS * 2
+    return messages[-limit:] if len(messages) > limit else messages
+
+
+def _trim_journal(journal_context: str | None) -> str | None:
+    """Hard-truncate journal text so it can't blow up the context window."""
+    if not journal_context:
+        return None
+    if len(journal_context) <= MAX_JOURNAL_CHARS:
+        return journal_context
+    # Trim and add a clear marker so the model knows it's partial
+    return journal_context[:MAX_JOURNAL_CHARS] + "\n… [truncated for context]"
+
+
+def _trim_memory_content(content: str) -> str:
+    """Cap each individual memory so one long entry can't flood the prompt."""
+    if len(content) <= MAX_MEMORY_CHARS:
+        return content
+    return content[:MAX_MEMORY_CHARS] + "…"
+
+
 # ─── Chat streaming ───────────────────────────────────────────────────────────
 
-# The system prompt no longer instructs the model to auto-suggest or auto-save
-# memories. Memory saving is now 100% user-driven via the UI dropdown.
 SYSTEM_PROMPT = """You are Aether, a private and thoughtful AI journal companion.
 Everything you process stays 100% local — nothing leaves this machine.
 
@@ -417,12 +452,6 @@ Guidelines:
 - When referring to past context from memories, acknowledge it naturally.
 """
 
-# Journal-pane agent uses the same system prompt but receives the full journal
-# text as additional context. A separate endpoint lets the frontend distinguish
-# "journal agent" from "standalone agent" without any backend logic change —
-# both go through /api/chat; the journal_context and journal_name fields carry
-# the distinction.
-
 
 async def _stream_chat(
     model:           str,
@@ -430,19 +459,26 @@ async def _stream_chat(
     journal_context: str | None,
     journal_name:    str | None,
 ):
-    # ── RAG: retrieve memories scoped to this journal (+ globals) ────────────
+    # ── 1. Trim conversation history before anything else ────────────────────
+    messages = _trim_history(messages)
+
+    # ── 2. RAG: retrieve memories scoped to this journal (+ globals) ─────────
     last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-    relevant  = search_memories(last_user, journal_name)
+    relevant  = search_memories(last_user, journal_name, n=MAX_MEMORY_RESULTS)
 
     memory_section = ""
     if relevant:
         scope_label = f'from journal "{journal_name}"' if journal_name else "global"
         lines = []
         for r in relevant:
-            jname = r.get("journal_name")
-            badge = f'[{jname}]' if jname else '[global]'
-            lines.append(f"  • {badge} {r['title'].replace('_', ' ')}: {r['content']}")
+            jname   = r.get("journal_name")
+            badge   = f'[{jname}]' if jname else '[global]'
+            content = _trim_memory_content(r["content"])
+            lines.append(f"  • {badge} {r['title'].replace('_', ' ')}: {content}")
         memory_section = f"What I remember ({scope_label} + global):\n" + "\n".join(lines) + "\n\n"
+
+    # ── 3. Trim journal before injecting ─────────────────────────────────────
+    journal_context = _trim_journal(journal_context)
 
     journal_section = ""
     if journal_context:
@@ -457,12 +493,22 @@ async def _stream_chat(
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
 
-    # ── Stream tokens straight to the client (no tool interception needed) ───
+    # ── 4. Stream with explicit generation limits ─────────────────────────────
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream(
             "POST",
             f"{OLLAMA_URL}/api/chat",
-            json={"model": model, "messages": ollama_messages, "stream": True},
+            json={
+                "model":    model,
+                "messages": ollama_messages,
+                "stream":   True,
+                "options": {
+                    "num_predict": MAX_PREDICT_TOKENS,
+                    "temperature": 0.7,
+                    "top_p":       0.9,
+                    "repeat_penalty": 1.1,
+                },
+            },
         ) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()

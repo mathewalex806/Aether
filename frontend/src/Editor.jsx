@@ -45,16 +45,16 @@ function UnsavedDialog({ entryName, onSave, onDiscard, onCancel }) {
 
 // ─── Memory Save Modal ────────────────────────────────────────────────────────
 function MemoryModal({ content, journalName, password, onClose }) {
-    const [title, setTitle]   = useState('');
-    const [scope, setScope]   = useState(journalName ? 'journal' : 'global');
+    const [title, setTitle] = useState('');
+    const [scope, setScope] = useState(journalName ? 'journal' : 'global');
     const [saving, setSaving] = useState(false);
-    const [saved, setSaved]   = useState(false);
+    const [saved, setSaved] = useState(false);
     const inputRef = useRef(null);
 
     // Auto-generate title
     useEffect(() => {
         const words = content.trim().split(/\s+/).slice(0, 5);
-        const auto  = words.map(w => w.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean).join('_');
+        const auto = words.map(w => w.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean).join('_');
         setTitle(auto.slice(0, 50));
     }, [content]);
 
@@ -166,7 +166,7 @@ function MemoryModal({ content, journalName, password, onClose }) {
                         <div style={{ display: 'flex', gap: 8 }}>
                             {[
                                 { value: 'journal', label: `📓 This entry` },
-                                { value: 'global',  label: '🌐 Global' },
+                                { value: 'global', label: '🌐 Global' },
                             ].map(opt => (
                                 <button
                                     key={opt.value}
@@ -207,9 +207,9 @@ function MemoryModal({ content, journalName, password, onClose }) {
                             transition: 'background 0.2s',
                         }}
                     >
-                        {saved   ? <><Check size={13} />  Saved!</>
-                        : saving ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</>
-                        :          <><Database size={13} /> Save to Memory</>}
+                        {saved ? <><Check size={13} />  Saved!</>
+                            : saving ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</>
+                                : <><Database size={13} /> Save to Memory</>}
                     </button>
                 </div>
             </div>
@@ -219,7 +219,7 @@ function MemoryModal({ content, journalName, password, onClose }) {
 
 // ─── Chat Message ─────────────────────────────────────────────────────────────
 function ChatMessage({ msg, journalName, password }) {
-    const [showMenu, setShowMenu]           = useState(false);
+    const [showMenu, setShowMenu] = useState(false);
     const [showMemoryModal, setShowMemoryModal] = useState(false);
     const menuRef = useRef(null);
     const isAssistant = msg.role === 'assistant';
@@ -343,12 +343,12 @@ function ChatMessage({ msg, journalName, password }) {
 
 // ─── Agent Pane (right side) ──────────────────────────────────────────────────
 function AgentPane({ name, password, getContent, models }) {
-    const [messages, setMessages]         = useState([]);
-    const [input, setInput]               = useState('');
-    const [streaming, setStreaming]       = useState(false);
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [streaming, setStreaming] = useState(false);
     const [selectedModel, setSelectedModel] = useState('');
     const scrollRef = useRef(null);
-    const inputRef  = useRef(null);
+    const inputRef = useRef(null);
 
     useEffect(() => {
         if (models.length && !selectedModel) setSelectedModel(models[0]);
@@ -363,7 +363,7 @@ function AgentPane({ name, password, getContent, models }) {
         const text = input.trim();
         if (!text || streaming || !selectedModel) return;
 
-        const userMsg    = { role: 'user', content: text };
+        const userMsg = { role: 'user', content: text };
         const newMessages = [...messages, userMsg];
         setMessages([...newMessages, { role: 'assistant', content: '' }]);
         setInput('');
@@ -382,9 +382,9 @@ function AgentPane({ name, password, getContent, models }) {
                 }),
             });
 
-            const reader  = response.body.getReader();
+            const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let buffer    = '';
+            let buffer = '';
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -584,17 +584,17 @@ function AgentPane({ name, password, getContent, models }) {
 
 // ─── Main Editor ──────────────────────────────────────────────────────────────
 export default function Editor({ name, password, onSaved, onDeleted, onNavigateAway }) {
-    const [content, setContent]           = useState('');
+    const [content, setContent] = useState('');
     const [savedContent, setSavedContent] = useState('');
-    const [loading, setLoading]           = useState(true);
-    const [saving, setSaving]             = useState(false);
-    const [error, setError]               = useState('');
-    const [saveStatus, setSaveStatus]     = useState('');
-    const [showConfirm, setShowConfirm]   = useState(false);
-    const [showUnsaved, setShowUnsaved]   = useState(false);
-    const [pendingNav, setPendingNav]     = useState(null);
-    const [agentOpen, setAgentOpen]       = useState(false);
-    const [models, setModels]             = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const [saveStatus, setSaveStatus] = useState('');
+    const [showConfirm, setShowConfirm] = useState(false);
+    const [showUnsaved, setShowUnsaved] = useState(false);
+    const [pendingNav, setPendingNav] = useState(null);
+    const [agentOpen, setAgentOpen] = useState(false);
+    const [models, setModels] = useState([]);
     const textareaRef = useRef(null);
 
     const isDirty = content !== savedContent;
@@ -624,7 +624,7 @@ export default function Editor({ name, password, onSaved, onDeleted, onNavigateA
         fetch('/api/models')
             .then(r => r.json())
             .then(d => setModels(d.models || []))
-            .catch(() => {});
+            .catch(() => { });
     }, []);
 
     // ── Navigation guard ────────────────────────────────────────────────────
@@ -817,7 +817,7 @@ export default function Editor({ name, password, onSaved, onDeleted, onNavigateA
                                 value={content}
                                 onChange={e => setContent(e.target.value)}
                                 placeholder="Start writing your secure thoughts..."
-                                spellCheck="false"
+                                spellCheck={true}
                             />
                             <footer style={{
                                 padding: '12px 24px',

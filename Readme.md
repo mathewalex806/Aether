@@ -1,52 +1,45 @@
 # Aether
 
+A fully encrypted, private journaling application designed to secure your thoughts and data.
 
-A fully encrypted, private journaling application with:
-- **Python/FastAPI backend** using `python-gnupg` (AES-256 symmetric encryption)
-- **React/Vite frontend** with a premium dark-mode UI
-- **Docker Compose** setup with a bind mount for `.gpg` file persistence
+## Features
 
-## Project Structure
+### Encrypted Journaling
+Aether provides a secure environment for your personal entries. Every file is fully encrypted on disk using AES-256 symmetric encryption and remains unreadable without your unique passphrase. The password is never written to disk or local storage, ensuring maximum privacy.
 
-```
-secure-journal/
-├── docker-compose.yml
-├── data/                      # Your .gpg files live here (on host machine)
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app.py                 # FastAPI with gnupg encryption API
-└── frontend/
-    ├── Dockerfile
-    ├── vite.config.js          # Proxy: /api → backend:8000
-    └── src/
-        ├── index.css           # Full design system (dark mode, animations)
-        ├── api.js              # API client (password as x-password header)
-        ├── App.jsx             # Root: auth state + layout orchestration
-        ├── AuthScreen.jsx      # Password gate with animated background
-        ├── Sidebar.jsx         # File list, search, new entry form
-        └── Editor.jsx          # Decrypts on load, encrypts on save
-```
+![Home Page](imgaes/homepage.png)
 
-## How Encryption Works
+### Secure Editor
+The core of Aether is a clean, distraction-free editor featuring a premium dark-mode interface. Files are decrypted only in memory when loaded and immediately re-encrypted upon saving. 
 
-1. **First launch**: Enter a passphrase → backend creates `.sentinel.gpg` using AES-256
-2. **Subsequent launches**: Backend decrypts `.sentinel.gpg` to verify passphrase
-3. **Files on disk**: Every `.gpg` file is fully encrypted — unreadable without the passphrase
-4. **In transit**: Password is sent as an HTTP header (stays within Docker's private `journal-net` bridge network)
-5. **In memory only**: The password is never written to disk or localStorage
+![Editor](imgaes/editor.png)
 
-## Verification
+### AI Agent Chat
+Aether includes an integrated AI agent assistant. This allows you to interact intelligently with your journal entries and ideas directly within the secure environment.
 
-- ✅ `vite build` completed with no errors
-- ✅ All React components compile cleanly
-- ✅ Docker images build successfully
+![AI Agent Chat](imgaes/ai_agent_chat.png)
 
-## How to Start
+### Memory Management
+The Memory feature provides enhanced context and recall capabilities, allowing the application to intelligently reference past ideas and notes while maintaining strict data privacy.
+
+![Memory](imgaes/memory.png)
+
+## Architecture Overview
+
+Aether is built using a modern, containerized stack:
+- **Backend**: Python and FastAPI utilizing `python-gnupg` for cryptographic operations.
+- **Frontend**: React and Vite, delivering a responsive single-page application.
+- **Database**: Local file system storage, keeping data resilient as independent, AES-256 encrypted `.gpg` files.
+- **Vector Database**: ChromaDB is used to manage and query embeddings for the AI Agent and Memory capabilities.
+- **Infrastructure**: Docker Compose with bind mounts for persistent, encrypted file storage on the host machine.
+
+## Getting Started
+
+To launch the application locally, ensure Docker is installed and run the following commands:
 
 ```bash
 cd Aether/
 docker compose up --build
 ```
 
-Then open: [http://localhost:5173](http://localhost:5173)
+Once the containers are running, access the application at: http://localhost:5173
